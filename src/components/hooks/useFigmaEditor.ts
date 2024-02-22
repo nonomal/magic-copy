@@ -6,43 +6,6 @@ import { modelData } from "../../lib/models";
 
 const UPLOAD_IMAGE_SIZE = 1024;
 
-function trim(pixels: ImageData) {
-  const bound = {
-    top: pixels.height,
-    left: pixels.width,
-    right: 0,
-    bottom: 0,
-  };
-
-  for (let x = 0; x < pixels.width; x++) {
-    for (let y = 0; y < pixels.height; y++) {
-      const i = (y * pixels.width + x) * 4;
-      if (pixels.data[i + 3] === 0) {
-        continue;
-      }
-      if (y < bound.top) {
-        bound.top = y;
-      }
-      if (x < bound.left) {
-        bound.left = x;
-      }
-      if (x > bound.right) {
-        bound.right = x;
-      }
-      if (y > bound.bottom) {
-        bound.bottom = y;
-      }
-    }
-  }
-
-  const trimHeight = bound.bottom - bound.top + 1,
-    trimWidth = bound.right - bound.left + 1;
-  if (trimWidth <= 0 || trimHeight <= 0) {
-    return null;
-  }
-  return [bound.left, bound.top, trimWidth, trimHeight];
-}
-
 export default function useFigmaEditor(image: Blob) {
   const [bitmap, setBitmap] = React.useState<HTMLImageElement | null>(null);
   const [embeddings, setEmbeddings] = React.useState<Tensor | null>(null);
@@ -50,8 +13,9 @@ export default function useFigmaEditor(image: Blob) {
   const [clicks, setClicks] = React.useState<{ x: number; y: number }[]>([]);
   // the masked image
   const [mask, setMask] = React.useState<Tensor | null>(null);
+  const [maskImage, setMaskImage] = React.useState<Blob | null>(null);
+  const [originalImage, setOriginalImage] = React.useState<Blob | null>(null);
   const [renderedImage, setRenderedImage] = React.useState<Blob | null>(null);
-  const [trimmedImage, setTrimmedImage] = React.useState<Blob | null>(null);
   const predMasksRef = React.useRef<Tensor[]>([]);
 
   React.useEffect(() => {
@@ -61,6 +25,22 @@ export default function useFigmaEditor(image: Blob) {
       setBitmap(img);
     };
   }, [image]);
+
+  React.useEffect(() => {
+    if (!bitmap) {
+      return;
+    }
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      return;
+    }
+    ctx.drawImage(bitmap, 0, 0);
+    canvas.convertToBlob().then(setOriginalImage);
+    return () => {
+      setOriginalImage(null);
+    }
+  }, [bitmap]);
 
   React.useEffect(() => {
     if (!bitmap) {
@@ -114,7 +94,7 @@ export default function useFigmaEditor(image: Blob) {
     };
     if (clicks.length === 0) {
       setMask(null);
-      setTrimmedImage(null);
+      setRenderedImage(null);
       predMasksRef.current.splice(0, predMasksRef.current.length);
       return;
     }
@@ -172,6 +152,33 @@ export default function useFigmaEditor(image: Blob) {
     if (!bitmap || !traced) {
       return;
     }
+    // convert the traced mask to a black/white image by drawing the mask on a canvas
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      return;
+    }
+    // fill the background with black
+    ctx.fillStyle = "black";
+    ctx.fillRect(0, 0, bitmap.width, bitmap.height);
+    // fill the mask with white
+    ctx.fillStyle = "white";
+    ctx.strokeStyle = "white";
+    ctx.lineWidth = 10;
+    for (const path of traced) {
+      ctx.fill(new Path2D(path));
+      ctx.stroke(new Path2D(path));
+    }
+    canvas.convertToBlob().then(setMaskImage);
+    return () => {
+      setMaskImage(null);
+    };
+  }, [bitmap, traced]);
+
+  React.useEffect(() => {
+    if (!bitmap || !traced) {
+      return;
+    }
     const offscreen = new OffscreenCanvas(bitmap.width, bitmap.height);
     const offscreenCtx = offscreen.getContext("2d");
     if (!offscreenCtx) return;
@@ -181,33 +188,22 @@ export default function useFigmaEditor(image: Blob) {
     offscreenCtx.fillStyle = "rgba(0, 0, 0, 1)";
     offscreenCtx.globalCompositeOperation = "source-in";
     offscreenCtx.drawImage(bitmap, 0, 0);
-    const trimmed = trim(
-      offscreenCtx.getImageData(0, 0, bitmap.width, bitmap.height)
-    );
     offscreen.convertToBlob({ type: "image/png" }).then(setRenderedImage);
-    if (trimmed == null) {
-      setTrimmedImage(null);
-    } else {
-      const [tx, ty, tw, th] = trimmed;
-      const copy = new OffscreenCanvas(tw, th);
-      const copyCtx = copy.getContext("2d");
-      if (copyCtx === null) {
-        throw new Error("Could not get context");
-      }
-      copyCtx.putImageData(offscreenCtx.getImageData(tx, ty, tw, th), 0, 0);
-      copy.convertToBlob({ type: "image/png" }).then(setTrimmedImage);
-    }
   }, [bitmap, traced]);
 
   return {
     bitmap,
     mask,
     traced,
+    maskImage,
+    originalImage,
     renderedImage,
-    trimmedImage,
     isLoading: !bitmap || !embeddings,
     onClick(x: number, y: number, type: "left" | "right") {
       setClicks((clicks) => [...clicks, { x, y }]);
+    },
+    onReset() {
+      setClicks([]);
     },
     onUndo() {
       setClicks((clicks) => clicks.slice(0, -1));
